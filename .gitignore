@@ -1,0 +1,27 @@
+code .
+```
+
+## Step 4 — Paste into `.gitignore` in VS Code
+```
+.env
+__pycache__/
+*.pyc
+.DS_Store
+db/*.db
+venv/
+.venv/
+```
+
+## Step 5 — Paste into `requirements.txt` in VS Code
+```
+fastapi==0.115.0
+uvicorn==0.30.6
+requests==2.32.3
+yfinance==0.2.44
+anthropic==0.39.0
+google-generativeai==0.8.3
+apscheduler==3.10.4
+python-dotenv==1.0.1
+pandas==2.2.3
+numpy==2.1.2
+pytest==8.3.3
