@@ -1,3 +1,7 @@
+fastapi
+uvicorn
+pandas
+numpy
 yfinance
 google-generativeai
 python-dotenv
