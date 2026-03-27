@@ -1,64 +1,187 @@
-import sqlite3
-import requests
-from apscheduler.schedulers.background import BackgroundScheduler
-import os
-from datetime import datetime
+from __future__ import annotations
 
-DB_DIR = "db"
-DB_PATH = f"{DB_DIR}/radar.db"
+import logging
+import math
+from typing import Any
 
-def init_db():
-    if not os.path.exists(DB_DIR):
-        os.makedirs(DB_DIR)
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_name TEXT,
-            trade_type TEXT, -- 'BULK_DEAL' or 'INSIDER_BUY'
-            value_in_rs REAL,
-            details TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+import yfinance as yf
 
-def fetch_bse_data():
-    print(f"[{datetime.now()}] Fetching BSE data...")
-    headers = {
-        "Referer": "https://www.bseindia.com/",
-        "User-Agent": "Mozilla/5.0"
-    }
-    
-    # In a real scenario, use requests.get() to hit BSE endpoints:
-    # URL 1: https://api.bseindia.com/BseIndiaAPI/api/BulkBlockDeal/w
-    # URL 2: https://api.bseindia.com/BseIndiaAPI/api/InsiderTrade/w
-    
-    # For hackathon/demo purposes, we seed db with initial data if empty
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM trades")
-    if cursor.fetchone()[0] == 0:
-        print("Seeding database with demo market data...")
-        cursor.executemany("""
-            INSERT INTO trades (company_name, trade_type, value_in_rs, details)
-            VALUES (?, ?, ?, ?)
-        """, [
-            ("Reliance Ind", "BULK_DEAL", 150000000, "Block deal by institutional investor"),
-            ("HDFC Bank", "INSIDER_BUY", 6000000, "Promoter buying shares off-market"),
-            ("TCS", "BULK_DEAL", 50000000, "Minor block deal, below threshold"),
-            ("Adani Ent", "INSIDER_BUY", 4000000, "Small insider buy, below threshold")
-        ])
-        conn.commit()
-    conn.close()
+from ingestion.models import get_connection, init_db
 
-def run_ingestion():
+
+SAMPLE_STOCKS = ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
+HISTORY_PERIOD = "7d"
+HISTORY_INTERVAL = "1d"
+MAX_ROWS_PER_SYMBOL = 5
+MARKET_CLIENT_NAME = "MARKET"
+MARKET_DEAL_TYPE = "BUY"
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None:
+        return None
+
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _validate_record(record: dict[str, Any]) -> tuple[bool, str | None]:
+    symbol = record.get("symbol")
+    quantity = record.get("quantity")
+    price = record.get("price")
+    deal_date = record.get("deal_date")
+
+    if not symbol:
+        return False, "missing symbol"
+    if quantity is None:
+        return False, "quantity is None"
+    if quantity == 0:
+        return False, "quantity is 0"
+    if price is None:
+        return False, "price is None"
+    if math.isnan(price):
+        return False, "price is NaN"
+    if not deal_date:
+        return False, "missing deal_date"
+
+    return True, None
+
+
+def _bulk_deal_exists(cursor: Any, symbol: str, deal_date: str, quantity: int, price: float) -> bool:
+    cursor.execute(
+        """
+        SELECT 1
+        FROM bulk_deals
+        WHERE symbol = ?
+          AND deal_date = ?
+          AND quantity = ?
+          AND ABS(price - ?) < 0.0001
+        LIMIT 1
+        """,
+        (symbol, deal_date, quantity, price),
+    )
+    return cursor.fetchone() is not None
+
+
+def _fetch_symbol_history(symbol: str) -> list[dict[str, Any]]:
+    try:
+        history = yf.Ticker(symbol).history(period=HISTORY_PERIOD, interval=HISTORY_INTERVAL)
+    except Exception as exc:
+        LOGGER.exception("Failed to fetch yfinance history for %s: %s", symbol, exc)
+        return []
+
+    if history.empty:
+        LOGGER.warning("No market history returned for %s", symbol)
+        return []
+
+    rows: list[dict[str, Any]] = []
+    history = history.tail(MAX_ROWS_PER_SYMBOL)
+
+    for timestamp, row in history.iterrows():
+        raw_close = row.get("Close")
+        close_price = float(raw_close) if raw_close else None
+        volume = _to_int(row.get("Volume"))
+        record = {
+            "symbol": symbol,
+            "client_name": MARKET_CLIENT_NAME,
+            "deal_type": MARKET_DEAL_TYPE,
+            "quantity": volume,
+            "price": close_price,
+            "deal_date": timestamp.date().isoformat(),
+        }
+        is_valid, reason = _validate_record(record)
+        if not is_valid:
+            LOGGER.warning(
+                "Skipping invalid market row for %s on %s: %s | close=%s volume=%s",
+                symbol,
+                timestamp,
+                reason,
+                raw_close,
+                row.get("Volume"),
+            )
+            continue
+
+        rows.append(record)
+
+    return rows
+
+
+def ingest_bulk_deals(symbols: list[str] | None = None) -> int:
     init_db()
-    fetch_bse_data() # Initial run before scheduler ticks
-    
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(fetch_bse_data, 'interval', minutes=15)
-    scheduler.start()
-    return scheduler
+    symbols = symbols or SAMPLE_STOCKS
+    inserted = 0
+
+    with get_connection() as connection:
+        cursor = connection.cursor()
+
+        for symbol in symbols:
+            records = _fetch_symbol_history(symbol)
+
+            for record in records:
+                is_valid, reason = _validate_record(record)
+                if not is_valid:
+                    LOGGER.warning(
+                        "Skipping invalid bulk deal record for %s on %s: %s",
+                        record.get("symbol"),
+                        record.get("deal_date"),
+                        reason,
+                    )
+                    continue
+
+                if _bulk_deal_exists(
+                    cursor,
+                    record["symbol"],
+                    record["deal_date"],
+                    record["quantity"],
+                    record["price"],
+                ):
+                    continue
+
+                cursor.execute(
+                    """
+                    INSERT INTO bulk_deals
+                        (symbol, client_name, deal_type, quantity, price, deal_date)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record["symbol"],
+                        record["client_name"],
+                        record["deal_type"],
+                        record["quantity"],
+                        record["price"],
+                        record["deal_date"],
+                    ),
+                )
+                inserted += 1
+
+        connection.commit()
+
+    LOGGER.info("Inserted %s simulated bulk deal records from yfinance", inserted)
+    return inserted
+
+
+def run_ingestion(symbols: list[str] | None = None) -> dict[str, int]:
+    bulk_inserted = ingest_bulk_deals(symbols=symbols)
+    return {"bulk_deals_inserted": bulk_inserted}
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    LOGGER.info("Ingestion completed: %s", run_ingestion())
