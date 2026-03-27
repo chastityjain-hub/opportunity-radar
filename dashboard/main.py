@@ -21,29 +21,38 @@ async def serve_dashboard() -> HTMLResponse:
     return HTMLResponse(INDEX_PATH.read_text(encoding="utf-8"))
 
 
+from signals.merger import merge_signals
+
 @app.get("/api/signals")
-async def get_signals() -> dict[str, list[dict[str, object]]]:
+async def get_signals():
     merged_signals = merge_signals()
 
-    enriched_signals: list[dict[str, object]] = []
-    for signal in merged_signals:
-        enriched_signals.append(
-            {
-                "symbol": signal["symbol"],
-                "signal_types_combined": signal["signal_types_combined"],
-                "strength": signal["strength"],
-                "conviction_score": signal["conviction_score"],
-                "date": signal["date"],
-                "explanation": generate_signal_explanation_from_dict(signal),
-            }
-        )
+    enriched_signals = []
 
+    for signal in merged_signals:
+        score = signal.get("conviction_score", 0)
+
+        # Convert score → label
+        if score >= 8:
+            conviction = "Strong"
+        elif score >= 5:
+            conviction = "Moderate"
+        else:
+            conviction = "Weak"
+
+        enriched_signals.append({
+            "symbol": signal.get("symbol"),
+            "signal_types_combined": signal.get("signal_types_combined"),
+            "score": score,
+            "conviction": conviction,
+            "date": signal.get("date"),
+            "explanation": generate_signal_explanation_from_dict(signal)
+        })
+
+    # Sort (highest score first)
     enriched_signals.sort(
-        key=lambda item: (
-            int(item["conviction_score"]),
-            str(item["date"]),
-            str(item["symbol"]),
-        ),
-        reverse=True,
+        key=lambda x: (x["score"], x["date"]),
+        reverse=True
     )
+
     return {"signals": enriched_signals}

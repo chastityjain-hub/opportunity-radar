@@ -698,6 +698,21 @@
             return "Weak";
         }
 
+        function normalizeSignal(signal) {
+            const scoreValue = Number(
+                signal.score ?? signal.conviction_score ?? signal.value ?? 0
+            );
+
+            return {
+                symbol: String(signal.symbol ?? "UNKNOWN"),
+                signal_types_combined: String(signal.signal_types_combined ?? ""),
+                score: Number.isFinite(scoreValue) ? scoreValue : 0,
+                strength: getGroupName(Number.isFinite(scoreValue) ? scoreValue : 0),
+                date: String(signal.date ?? ""),
+                explanation: String(signal.explanation ?? ""),
+            };
+        }
+
         function getSignalTags(signalTypesCombined) {
             return signalTypesCombined.split(" + ").map(item => item.trim()).filter(Boolean);
         }
@@ -744,16 +759,18 @@
 
         function applyFilters(signals) {
             return signals.filter(signal => {
-                const stockMatch = stockFilter.value === "ALL" || signal.symbol === stockFilter.value;
-                const signalMatch = signalFilter.value === "ALL" || getSignalTags(signal.signal_types_combined).includes(signalFilter.value);
+                const stockValue = stockFilter.value || "ALL";
+                const signalValue = signalFilter.value || "ALL";
+                const stockMatch = stockValue === "ALL" || signal.symbol === stockValue;
+                const signalMatch = signalValue === "ALL" || getSignalTags(signal.signal_types_combined).includes(signalValue);
                 return stockMatch && signalMatch;
             });
         }
 
         function sortSignals(signals) {
             return [...signals].sort((a, b) => {
-                if (b.conviction_score !== a.conviction_score) {
-                    return b.conviction_score - a.conviction_score;
+                if (b.score !== a.score) {
+                    return b.score - a.score;
                 }
                 if (b.date !== a.date) {
                     return b.date.localeCompare(a.date);
@@ -770,9 +787,9 @@
             signalCount.textContent = `${filteredSignals.length} visible signal${filteredSignals.length === 1 ? "" : "s"}`;
 
             const grouped = {
-                Strong: filteredSignals.filter(signal => getGroupName(signal.conviction_score) === "Strong"),
-                Moderate: filteredSignals.filter(signal => getGroupName(signal.conviction_score) === "Moderate"),
-                Weak: filteredSignals.filter(signal => getGroupName(signal.conviction_score) === "Weak")
+                Strong: filteredSignals.filter(signal => getGroupName(signal.score) === "Strong"),
+                Moderate: filteredSignals.filter(signal => getGroupName(signal.score) === "Moderate"),
+                Weak: filteredSignals.filter(signal => getGroupName(signal.score) === "Weak")
             };
 
             const sections = Object.entries(grouped)
@@ -812,11 +829,11 @@
         }
 
         function renderCard(signal, index, topSignal) {
-            const groupClass = getGroupName(signal.conviction_score).toLowerCase();
+            const groupClass = getGroupName(signal.score).toLowerCase();
             const hasZscore = signal.signal_types_combined.includes("zscore_anomaly");
             const isTopSignal = topSignal &&
                 signal.symbol === topSignal.symbol &&
-                signal.conviction_score === topSignal.conviction_score &&
+                signal.score === topSignal.score &&
                 signal.date === topSignal.date &&
                 signal.signal_types_combined === topSignal.signal_types_combined;
 
@@ -832,7 +849,7 @@
                         </div>
                         <div class="score-stack">
                             <div class="score-chip ${groupClass}">${escapeHtml(signal.strength)}</div>
-                            <div class="score-value">${escapeHtml(signal.conviction_score)}/10</div>
+                            <div class="score-value">${escapeHtml(signal.score)}/10</div>
                         </div>
                     </div>
                     <div class="meta">
@@ -842,7 +859,7 @@
                         </div>
                         <div class="meta-row">
                             <div class="meta-label">Confidence</div>
-                            <div class="meta-value">${escapeHtml(signal.strength)} confidence with conviction score ${escapeHtml(signal.conviction_score)}/10</div>
+                            <div class="meta-value">${escapeHtml(signal.strength)} confidence with conviction score ${escapeHtml(signal.score)}/10</div>
                         </div>
                         <div class="meta-row">
                             <div class="meta-label">Date</div>
@@ -887,7 +904,9 @@
                 }
 
                 const data = await response.json();
-                allSignals = Array.isArray(data.signals) ? data.signals : [];
+                const signals = Array.isArray(data.signals) ? data.signals.map(normalizeSignal) : [];
+                console.log("Signals received:", signals.length);
+                allSignals = signals;
                 populateFilters(allSignals);
                 renderSignals();
                 lastUpdated.textContent = `Last updated ${new Date().toLocaleTimeString()}`;
