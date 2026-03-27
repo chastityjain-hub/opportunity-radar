@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -22,9 +23,15 @@ async def serve_dashboard() -> HTMLResponse:
 
 
 from signals.merger import merge_signals
+import subprocess
 
 @app.get("/api/signals")
 async def get_signals():
+
+    subprocess.run(["python", "-m", "ingestion.bse_ingestion"])
+    subprocess.run(["python", "-m", "signals.rules"])
+    subprocess.run(["python", "-m", "baseline.zscore"])
+    
     merged_signals = merge_signals()
 
     enriched_signals = []
